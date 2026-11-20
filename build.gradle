@@ -1,0 +1,143 @@
+plugins {
+    id 'java'
+    id 'org.jetbrains.intellij.platform' version '2.20.1'
+}
+
+group = 'com.debugmock'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+    intellijPlatform {
+        defaultRepositories()
+    }
+}
+
+// Dependencies of the runtime javaagent (shaded into the agent jar).
+configurations {
+    agentDeps
+}
+
+dependencies {
+    intellijPlatform {
+        // Target IDE used to compile and verify the plugin.
+        intellijIdea('2026.3')
+        // Java PSI (PsiMethod / PsiClass / PsiType) lives in the bundled Java plugin.
+        bundledPlugin('com.intellij.java')
+    }
+
+    // Gson ships with the IntelliJ platform at runtime; only needed at compile time.
+    compileOnly 'com.google.code.gson:gson:2.10.1'
+    testImplementation 'junit:junit:4.13.2'
+
+    agentDeps 'org.ow2.asm:asm:9.10.1'
+    agentDeps 'org.ow2.asm:asm-tree:9.10.1'
+    agentDeps 'org.ow2.asm:asm-analysis:9.10.1'
+    agentDeps 'com.google.code.gson:gson:2.10.1'
+}
+
+sourceSets {
+    agent {
+        java {
+            srcDirs = ['src/agent/java']
+        }
+        compileClasspath = configurations.agentDeps
+        runtimeClasspath = configurations.agentDeps
+    }
+    // Small developer tools (not part of the plugin): the HotSwap client used by `hotSwap`.
+    devTools {
+        java {
+            srcDirs = ['src/devTools/java']
+        }
+    }
+}
+
+// The agent is a fat jar so it can be attached to any JVM with a single -javaagent option.
+tasks.register('agentJar', Jar) {
+    dependsOn tasks.named('compileAgentJava')
+    from sourceSets.agent.output
+    from { configurations.agentDeps.collect { it.isDirectory() ? it : zipTree(it) } }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'module-info.class'
+    archiveFileName = 'debugmock-agent.jar'
+    destinationDirectory = layout.buildDirectory.dir('agent')
+    manifest {
+        attributes 'Premain-Class': 'com.debugmock.agent.MockAgent',
+                'Can-Retransform-Classes': 'true',
+                'Can-Redefine-Classes': 'true'
+    }
+}
+
+tasks.named('processResources') {
+    dependsOn tasks.named('agentJar')
+    from(tasks.named('agentJar')) {
+        into 'agent'
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+// The agent is attached to arbitrary application JVMs (JDK 8+), so it must NOT inherit the
+// plugin's Java 25 toolchain. Compile it against the Java 8 API to keep class file version 52.
+tasks.named('compileAgentJava') {
+    options.release = 8
+}
+
+intellijPlatform {
+    pluginConfiguration {
+        id = 'com.debugmock.editor'
+        name = 'DebugMock'
+        version = project.version.toString()
+        description = '''Quickly create, edit and manage Mock rules directly from the Java editor using PSI.'''
+        changeNotes = '''Initial release: editor quick add / edit / toggle / remove mock rules.'''
+        ideaVersion {
+            sinceBuild = '263'
+        }
+    }
+
+    pluginVerification {
+        failureLevel = ['INVALID_PLUGIN_XML', 'MISSING_DEPENDENCIES']
+    }
+}
+
+// The dev IDE must accept class redefinition with added methods / fields (HotSwap below).
+tasks.named('runIde') {
+    // Use the freshly built agent from disk: hotSwap cannot update the jar bundled as a plugin
+    // resource, so agent-side changes would otherwise be invisible until a full IDE restart.
+    jvmArgs '-XX:+AllowEnhancedClassRedefinition', '-XX:+AllowRedefinitionToAddDeleteMethods',
+            '-Ddebugmock.agent.jar=' + layout.buildDirectory.file('agent/debugmock-agent.jar').get().asFile.absolutePath
+    debugOptions {
+        // --debug-jvm must not block the IDE on the debugger attach.
+        suspend = false
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// True hot reload of the plugin code (no IDE restart, no reinstall).
+//
+// Start the dev IDE once with `scripts/dev-debug.sh` (it runs `runIde --debug-jvm`), then run
+// `./gradlew hotSwap` after every Java change: it attaches to the IDE's JDWP port and redefines
+// the loaded DebugMock classes with the freshly compiled bytecode. `plugin.xml` / extension
+// changes still need `scripts/restart-ide.sh`, because the platform cannot re-register
+// extensions at runtime.
+// -------------------------------------------------------------------------------------------
+tasks.register('hotSwap', JavaExec) {
+    group = 'debugmock'
+    description = 'Redefines the plugin classes in a runIde started with --debug-jvm (no restart).'
+    dependsOn tasks.named('compileJava'), tasks.named('compileDevToolsJava')
+    classpath = sourceSets.devTools.runtimeClasspath
+    mainClass = 'com.debugmock.dev.HotSwap'
+    jvmArgs '--add-modules', 'jdk.jdi'
+    args = [
+            providers.gradleProperty('debugPort').getOrElse('5005'),
+            layout.buildDirectory.dir('classes/java/main').get().asFile.absolutePath
+    ]
+}

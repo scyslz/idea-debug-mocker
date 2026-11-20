@@ -1,0 +1,71 @@
+<idea-plugin>
+    <id>com.debugmock.editor</id>
+    <name>DebugMock</name>
+    <version>1.0.0</version>
+    <vendor>DebugMock</vendor>
+
+    <description><![CDATA[
+        Create and manage <b>Mock rules</b> directly from the Java editor. Right-click a method
+        (or use the gutter icon) to add a mock rule with an automatically generated JVM signature.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="DebugMock" displayType="BALLOON"/>
+        <codeInsight.lineMarkerProvider language="JAVA"
+                                        implementationClass="com.debugmock.gutter.MockMethodLineMarkerProvider"/>
+        <codeInsight.lineMarkerProvider language="JAVA"
+                                        implementationClass="com.debugmock.gutter.MockStatementLineMarkerProvider"/>
+        <toolWindow id="DebugMock" anchor="bottom" canCloseContents="false"
+                    icon="/icons/debugmock.svg"
+                    factoryClass="com.debugmock.toolwindow.MockToolWindowFactory"/>
+        <runConfigurationExtension implementation="com.debugmock.run.MockAgentRunExtension"/>
+    </extensions>
+
+    <projectListeners>
+        <listener class="com.debugmock.debug.MockDebugSessionListener"
+                  topic="com.intellij.debugger.impl.DebuggerManagerListener"/>
+    </projectListeners>
+
+    <actions>
+        <group id="DebugMockGroup" text="DebugMock" description="DebugMock editor actions"
+               popup="true" icon="/icons/debugmock.svg">
+            <action id="DebugMock.AddRule"
+                    class="com.debugmock.actions.AddMockRuleAction"
+                    text="Add Mock Rule"
+                    description="Create a mock rule for the selected Java method"/>
+            <action id="DebugMock.EditRule"
+                    class="com.debugmock.actions.EditMockRuleAction"
+                    text="Edit Mock Rule"
+                    description="Edit the mock rule of the selected Java method"/>
+            <action id="DebugMock.ToggleRule"
+                    class="com.debugmock.actions.ToggleMockRuleAction"
+                    text="Enable / Disable Mock"
+                    description="Toggle the enabled state of the mock rule"/>
+            <action id="DebugMock.RemoveRule"
+                    class="com.debugmock.actions.RemoveMockRuleAction"
+                    text="Remove Mock Rule"
+                    description="Remove the mock rule of the selected Java method"/>
+            <action id="DebugMock.AddExecute"
+                    class="com.debugmock.actions.AddExecuteAction"
+                    text="Add Rule at This Line"
+                    description="Add a mock rule that runs at the current source line"/>
+            <action id="DebugMock.CopyAgentOptions"
+                    class="com.debugmock.actions.CopyAgentOptionsAction"
+                    text="Copy Agent JVM Options (Remote JVM)"
+                    description="Copy the -javaagent options for a remote JVM"/>
+
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </group>
+
+        <action id="DebugMock.AddLineRule"
+                class="com.debugmock.actions.AddExecuteAction"
+                icon="/icons/debugmock.svg"
+                text="Add DebugMock Rule at This Line"
+                description="Add a mock rule that runs at the statement on the current line">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

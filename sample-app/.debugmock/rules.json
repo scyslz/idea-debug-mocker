@@ -1,0 +1,41 @@
+[
+  {
+    "id": "sample-1",
+    "className": "demo.UserService",
+    "methodName": "getName",
+    "signature": "()Ljava/lang/String;",
+    "returnType": "Ljava/lang/String;",
+    "action": "RETURN",
+    "returnValue": "mock-name-from-rule",
+    "enabled": true
+  },
+  {
+    "id": "sample-2",
+    "className": "demo.UserService",
+    "methodName": "getAge",
+    "signature": "(Ljava/lang/Long;)I",
+    "returnType": "I",
+    "action": "RETURN",
+    "returnValue": "99",
+    "enabled": true
+  },
+  {
+    "id": "sample-3",
+    "className": "demo.UserService",
+    "methodName": "isVip",
+    "signature": "()Z",
+    "returnType": "Z",
+    "action": "RETURN",
+    "returnValue": "true",
+    "enabled": true
+  },
+  {
+    "id": "sample-4",
+    "className": "demo.UserService",
+    "methodName": "log",
+    "signature": "(Ljava/lang/String;)V",
+    "returnType": "V",
+    "action": "SKIP",
+    "enabled": true
+  }
+]

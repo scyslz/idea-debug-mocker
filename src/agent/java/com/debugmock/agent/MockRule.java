@@ -19,6 +19,10 @@ public class MockRule {
     public String lineAnchor;
     /** 0-based index of the target statement among the method's statement-start lines. */
     public int lineOrdinal = -1;
+    /** True when the rule targets an interface; the agent then applies it to implementors. */
+    public boolean interfaceRule;
+    /** JVM binary name of the target (nested classes use '$'); empty for older rules. */
+    public String binaryClassName;
     /** Parameter names of the target method (used to bind names in conditions). */
     public String[] parameterNames;
     /** Local variables in scope at the rule line (names + JVM descriptors). */

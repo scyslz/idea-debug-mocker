@@ -34,6 +34,16 @@ public class MockRule {
     private String lineAnchor;
     /** 0-based index of the target statement among the method's statement-start lines. */
     private int lineOrdinal = -1;
+    /**
+     * True when the rule was created on an interface method. Spring beans are usually typed by
+     * their interface and proxied, so the agent must apply the rule to the implementations too.
+     */
+    private boolean interfaceRule;
+    /**
+     * JVM binary name of the target class (nested classes use {@code $}). Optional; when present
+     * the agent matches bytecode with it instead of converting {@link #className}.
+     */
+    private String binaryClassName;
     /** Parameter names of the target method, so conditions can use them by name. */
     private String[] parameterNames;
     /** Names of the local variables in scope at the rule line (line rules only). */
@@ -202,6 +212,22 @@ public class MockRule {
     /** True when the rule carries enough information to relocate itself after source edits. */
     public boolean hasLineAnchor() {
         return lineAnchor != null && !lineAnchor.trim().isEmpty();
+    }
+
+    public boolean isInterfaceRule() {
+        return interfaceRule;
+    }
+
+    public void setInterfaceRule(boolean interfaceRule) {
+        this.interfaceRule = interfaceRule;
+    }
+
+    public String getBinaryClassName() {
+        return binaryClassName;
+    }
+
+    public void setBinaryClassName(String binaryClassName) {
+        this.binaryClassName = binaryClassName;
     }
 
     public String[] getParameterNames() {

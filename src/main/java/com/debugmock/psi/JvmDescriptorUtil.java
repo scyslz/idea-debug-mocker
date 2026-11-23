@@ -22,6 +22,22 @@ public final class JvmDescriptorUtil {
     }
 
     /**
+     * JVM binary name of a class ({@code pkg.Outer$Inner}). {@link PsiClass#getQualifiedName()}
+     * uses dots for nesting, which never matches a class file name.
+     */
+    public static String binaryClassName(PsiClass psiClass) {
+        String qualified = psiClass.getQualifiedName();
+        if (qualified == null) {
+            return null;
+        }
+        String packageName = psiClass.getContainingFile() instanceof com.intellij.psi.PsiJavaFile
+                ? ((com.intellij.psi.PsiJavaFile) psiClass.getContainingFile()).getPackageName() : "";
+        String local = packageName.isEmpty() ? qualified
+                : qualified.substring(Math.min(qualified.length(), packageName.length() + 1));
+        return (packageName.isEmpty() ? "" : packageName + ".") + local.replace('.', '$');
+    }
+
+    /**
      * Full JVM signature, e.g. {@code (Ljava/lang/Long;)Ljava/lang/String;}.
      */
     public static String methodDescriptor(PsiMethod method) {

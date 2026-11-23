@@ -389,6 +389,16 @@ public class AddMockRuleDialog extends DialogWrapper {
         rule.setEnabled(enabledBox.isSelected());
         rule.setCondition(conditionField.getText().trim());
         rule.setLineNumber(lineNumber);
+        // An interface / abstract method has no body at runtime: the agent must apply the rule to
+        // the implementations (Spring beans are usually proxied behind their interface or base).
+        rule.setInterfaceRule(ReadAction.compute(() -> {
+            com.intellij.psi.PsiClass owner = methodInfo.getMethod().getContainingClass();
+            return (owner != null && owner.isInterface()) || methodInfo.getMethod().getBody() == null;
+        }));
+        rule.setBinaryClassName(ReadAction.compute(() -> {
+            com.intellij.psi.PsiClass owner = methodInfo.getMethod().getContainingClass();
+            return owner == null ? null : com.debugmock.psi.JvmDescriptorUtil.binaryClassName(owner);
+        }));
         // Bind the rule to the statement text, not only to the line number: rules then follow
         // their code when lines above are inserted / deleted (like debugger breakpoints).
         if (lineNumber > 0) {

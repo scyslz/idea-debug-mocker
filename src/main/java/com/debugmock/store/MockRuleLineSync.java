@@ -109,41 +109,74 @@ public final class MockRuleLineSync {
             if (project.isDisposed()) {
                 return;
             }
-            List<MockRule> rules = MockRuleStore.getInstance().load(project);
-            boolean changed = false;
-            for (MockRule rule : rules) {
-                if (rule.getLineNumber() <= 0) {
-                    continue;
+            // Class lookup needs the Java index; retry the same files once indexing is finished.
+            if (com.intellij.openapi.project.DumbService.getInstance(project).isDumb()) {
+                synchronized (pending) {
+                    pending.addAll(files);
                 }
-                PsiMethod method = findMethod(rule, files);
-                if (method == null) {
-                    continue;
+                com.intellij.openapi.project.DumbService.getInstance(project)
+                        .runWhenSmart(this::syncPending);
+                return;
+            }
+            try {
+                syncRules(files);
+            } catch (com.intellij.openapi.project.IndexNotReadyException ignored) {
+                synchronized (pending) {
+                    pending.addAll(files);
                 }
-                int resolved = RuleLines.resolve(rule, method);
-                if (resolved <= 0) {
-                    continue;
+            }
+        });
+    }
+
+    private void syncRules(Set<VirtualFile> files) {
+        List<MockRule> rules = MockRuleStore.getInstance().load(project);
+        boolean changed = false;
+        for (MockRule rule : rules) {
+            PsiMethod method = findMethod(rule, files);
+            if (method == null) {
+                continue;
+            }
+            boolean ruleChanged = false;
+            // Backfill the interface flag for rules created before it existed: interface
+            // methods have no body, so the agent has to instrument the implementors.
+            if (!rule.isInterfaceRule()) {
+                com.intellij.psi.PsiClass owner = method.getContainingClass();
+                if ((owner != null && owner.isInterface()) || method.getBody() == null) {
+                    rule.setInterfaceRule(true);
+                    ruleChanged = true;
                 }
-                boolean lineMoved = resolved != rule.getLineNumber();
-                boolean needsAnchor = !rule.hasLineAnchor() || rule.getLineOrdinal() < 0;
-                if (!lineMoved && !needsAnchor) {
-                    continue;
-                }
-                String anchor = RuleLines.anchorFor(method, resolved);
-                int ordinal = RuleLines.ordinalFor(method, resolved);
-                if (anchor == null || ordinal < 0) {
-                    // Not a statement start (e.g. the anchor statement was deleted): leave it.
-                    continue;
-                }
-                rule.setLineNumber(resolved);
-                rule.setLineAnchor(anchor);
-                rule.setLineOrdinal(ordinal);
+            }
+            if (ruleChanged) {
                 rule.setUpdatedAt(System.currentTimeMillis());
                 changed = true;
             }
-            if (changed) {
-                MockRuleStore.getInstance().save(project, rules);
+            if (rule.getLineNumber() <= 0) {
+                continue;
             }
-        });
+            int resolved = RuleLines.resolve(rule, method);
+            if (resolved <= 0) {
+                continue;
+            }
+            boolean lineMoved = resolved != rule.getLineNumber();
+            boolean needsAnchor = !rule.hasLineAnchor() || rule.getLineOrdinal() < 0;
+            if (!lineMoved && !needsAnchor) {
+                continue;
+            }
+            String anchor = RuleLines.anchorFor(method, resolved);
+            int ordinal = RuleLines.ordinalFor(method, resolved);
+            if (anchor == null || ordinal < 0) {
+                // Not a statement start (e.g. the anchor statement was deleted): leave it.
+                continue;
+            }
+            rule.setLineNumber(resolved);
+            rule.setLineAnchor(anchor);
+            rule.setLineOrdinal(ordinal);
+            rule.setUpdatedAt(System.currentTimeMillis());
+            changed = true;
+        }
+        if (changed) {
+            MockRuleStore.getInstance().save(project, rules);
+        }
     }
 
     private PsiMethod findMethod(MockRule rule, Set<VirtualFile> files) {

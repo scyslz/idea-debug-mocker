@@ -46,19 +46,39 @@ public final class MockTransformer implements ClassFileTransformer {
     private static final String RUNTIME = "com/debugmock/agent/MockRuntime";
 
     private final Map<String, List<MockRule>> rulesByClass = new HashMap<>();
+    /** Rules created on an interface, keyed by the interface's internal name. */
+    private final Map<String, List<MockRule>> rulesByInterface = new HashMap<>();
 
     public MockTransformer(List<MockRule> rules) {
         for (MockRule rule : rules) {
             if (!rule.enabled || rule.className == null || rule.methodName == null || rule.signature == null) {
                 continue;
             }
-            String internal = rule.className.replace('.', '/');
+            String binary = rule.binaryClassName == null || rule.binaryClassName.trim().isEmpty()
+                    ? rule.className : rule.binaryClassName.trim();
+            String internal = binary.replace('.', '/');
             rulesByClass.computeIfAbsent(internal, k -> new ArrayList<>()).add(rule);
+            if (rule.interfaceRule) {
+                rulesByInterface.computeIfAbsent(internal, k -> new ArrayList<>()).add(rule);
+            }
         }
     }
 
     public boolean isTarget(String dottedClassName) {
         return dottedClassName != null && rulesByClass.containsKey(dottedClassName.replace('.', '/'));
+    }
+
+    public boolean hasInterfaceRules() {
+        return !rulesByInterface.isEmpty();
+    }
+
+    /** Dotted interface names targeted by interface rules (used for the loaded-class scan). */
+    public Set<String> interfaceNames() {
+        Set<String> result = new HashSet<>();
+        for (String internal : rulesByInterface.keySet()) {
+            result.add(internal.replace('/', '.'));
+        }
+        return result;
     }
 
     /** Dotted names of all classes this transformer modifies (used for hot reload). */
@@ -74,7 +94,7 @@ public final class MockTransformer implements ClassFileTransformer {
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                             ProtectionDomain protectionDomain, byte[] classfileBuffer) {
         List<MockRule> rules = className == null ? null : rulesByClass.get(className);
-        if (rules == null || rules.isEmpty()) {
+        if ((rules == null || rules.isEmpty()) && rulesByInterface.isEmpty()) {
             return null;
         }
         try {
@@ -82,19 +102,48 @@ public final class MockTransformer implements ClassFileTransformer {
             ClassNode classNode = new ClassNode();
             reader.accept(classNode, 0);
 
+            List<MockRule> applicable = new ArrayList<>();
+            if (rules != null) {
+                applicable.addAll(rules);
+            }
+            if (!rulesByInterface.isEmpty() && !isProxyName(classNode.name)) {
+                List<MockRule> interfaceRules = rulesForInterfaces(classNode);
+                if (interfaceRules != null) {
+                    applicable.addAll(interfaceRules);
+                }
+            }
+            if (applicable.isEmpty()) {
+                return null;
+            }
             List<MethodNode> instrumented = new ArrayList<>();
             for (MethodNode method : classNode.methods) {
-                List<MockRule> methodRules = findRules(rules, method.name, method.desc);
+                List<MockRule> methodRules = findRules(applicable, method.name, method.desc);
                 if (methodRules.isEmpty()
                         || (method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
                     continue;
                 }
-                instrument(classNode, method, methodRules, loader);
-                instrumented.add(method);
+                if (instrument(classNode, method, methodRules, loader)) {
+                    instrumented.add(method);
+                }
             }
             if (instrumented.isEmpty()) {
+                if (applicable != null && !applicable.isEmpty()
+                        && (classNode.access & Opcodes.ACC_INTERFACE) == 0) {
+                    System.err.println("[DebugMock] " + classNode.name
+                            + ": rules present but nothing was instrumented (method descriptor "
+                            + applicable.get(0).methodName + applicable.get(0).signature
+                            + " not found, or line could not be placed)");
+                }
                 return null;
             }
+            StringBuilder methods = new StringBuilder();
+            for (MethodNode method : instrumented) {
+                if (methods.length() > 0) {
+                    methods.append(", ");
+                }
+                methods.append(method.name).append(method.desc);
+            }
+            System.out.println("[DebugMock] instrumented " + classNode.name + " -> " + methods);
             // A reader-backed ClassWriter ignores inserted compressed frames, and COMPUTE_FRAMES
             // would need application classes that may be invisible to the agent's classloader.
             // Writing with a plain writer keeps the original frames and emits our F_SAME frames;
@@ -111,6 +160,42 @@ public final class MockTransformer implements ClassFileTransformer {
         }
     }
 
+    /** Rules of abstract targets implemented / extended directly by the class being transformed. */
+    private List<MockRule> rulesForInterfaces(ClassNode classNode) {
+        List<MockRule> result = null;
+        if (classNode.interfaces != null) {
+            for (String implemented : classNode.interfaces) {
+                result = collectRules(result, implemented);
+            }
+        }
+        // Abstract base-class targets: direct subclasses only (avoids instrumenting proxy
+        // subclasses, which are filtered out by the agent's loaded-class scan).
+        if (classNode.superName != null) {
+            result = collectRules(result, classNode.superName);
+        }
+        return result;
+    }
+
+    private List<MockRule> collectRules(List<MockRule> result, String implemented) {
+        List<MockRule> atInterface = rulesByInterface.get(implemented);
+        if (atInterface == null || atInterface.isEmpty()) {
+            return result;
+        }
+        if (result == null) {
+            result = new ArrayList<>();
+        }
+        result.addAll(atInterface);
+        return result;
+    }
+
+    /** Spring CGLIB / JDK dynamic proxies must not be instrumented by interface rules. */
+    private static boolean isProxyName(String internalName) {
+        return internalName != null
+                && (internalName.contains("$$")
+                || internalName.startsWith("com/sun/proxy/")
+                || internalName.startsWith("jdk/proxy"));
+    }
+
     private static List<MockRule> findRules(List<MockRule> rules, String name, String descriptor) {
         List<MockRule> result = new ArrayList<>();
         for (MockRule rule : rules) {
@@ -121,8 +206,8 @@ public final class MockTransformer implements ClassFileTransformer {
         return result;
     }
 
-    private static void instrument(ClassNode classNode, MethodNode method, List<MockRule> methodRules,
-                                   ClassLoader loader) {
+    private static boolean instrument(ClassNode classNode, MethodNode method, List<MockRule> methodRules,
+                                      ClassLoader loader) {
         List<MockRule> entryRules = new ArrayList<>();
         Map<Integer, List<MockRule>> lineRules = new LinkedHashMap<>();
         for (MockRule rule : methodRules) {
@@ -133,6 +218,7 @@ public final class MockTransformer implements ClassFileTransformer {
             }
         }
 
+        boolean injectedAny = false;
         if (!entryRules.isEmpty()) {
             InsnList injected = buildInjectedRules(entryRules, method, method.access, method.desc,
                     initialLocals(classNode.name, method));
@@ -142,14 +228,16 @@ public final class MockTransformer implements ClassFileTransformer {
             } else {
                 method.instructions.insertBefore(firstReal, injected);
             }
+            injectedAny = true;
         }
         if (!lineRules.isEmpty()) {
-            applyLineRules(classNode, method, lineRules, loader);
+            injectedAny |= applyLineRules(classNode, method, lineRules, loader);
         }
+        return injectedAny;
     }
 
-    private static void applyLineRules(ClassNode classNode, MethodNode method,
-                                       Map<Integer, List<MockRule>> lineRules, ClassLoader loader) {
+    private static boolean applyLineRules(ClassNode classNode, MethodNode method,
+                                          Map<Integer, List<MockRule>> lineRules, ClassLoader loader) {
         // Line numbers are stored as absolute source lines. When the app was not recompiled after
         // the source moved, the stored line no longer exists in the bytecode; fall back to the
         // statement ordinal so the rule still lands on the same statement.
@@ -167,7 +255,7 @@ public final class MockTransformer implements ClassFileTransformer {
         } catch (Throwable t) {
             System.err.println("[DebugMock] cannot analyse " + classNode.name + "." + method.name
                     + " for line rules: " + t);
-            return;
+            return false;
         }
 
         List<Insertion> insertions = new ArrayList<>();
@@ -207,6 +295,7 @@ public final class MockTransformer implements ClassFileTransformer {
                     buildInjectedRules(insertion.rules, method, method.access, method.desc,
                             insertion.locals));
         }
+        return !insertions.isEmpty();
     }
 
     /**

@@ -387,23 +387,33 @@ public class MockToolWindowFactory implements ToolWindowFactory {
          * in-memory copies are touched here; {@code MockRuleLineSync} persists the correction.
          */
         private void resolveDisplayLines(List<MockRule> rules) {
-            ReadAction.compute(() -> {
-                for (MockRule rule : rules) {
-                    if (rule.getLineNumber() <= 0) {
-                        continue;
+            // The tool window is created during startup, often before indexing finished. Finding
+            // classes would throw IndexNotReadyException; retry once the project is smart.
+            if (com.intellij.openapi.project.DumbService.getInstance(project).isDumb()) {
+                com.intellij.openapi.project.DumbService.getInstance(project).runWhenSmart(this::refresh);
+                return;
+            }
+            try {
+                ReadAction.compute(() -> {
+                    for (MockRule rule : rules) {
+                        if (rule.getLineNumber() <= 0) {
+                            continue;
+                        }
+                        MethodInfo info = MethodResolver.resolveByRule(
+                                project, rule.getClassName(), rule.getMethodName(), rule.getSignature());
+                        if (info == null) {
+                            continue;
+                        }
+                        int resolved = com.debugmock.psi.RuleLines.resolve(rule, info.getMethod());
+                        if (resolved > 0) {
+                            rule.setLineNumber(resolved);
+                        }
                     }
-                    MethodInfo info = MethodResolver.resolveByRule(
-                            project, rule.getClassName(), rule.getMethodName(), rule.getSignature());
-                    if (info == null) {
-                        continue;
-                    }
-                    int resolved = com.debugmock.psi.RuleLines.resolve(rule, info.getMethod());
-                    if (resolved > 0) {
-                        rule.setLineNumber(resolved);
-                    }
-                }
-                return null;
-            });
+                    return null;
+                });
+            } catch (com.intellij.openapi.project.IndexNotReadyException ignored) {
+                // Indexing started between the check and the lookup; the next refresh retries.
+            }
         }
 
         /** Master switch: checked only when every rule is enabled (mixed state stays unchecked). */

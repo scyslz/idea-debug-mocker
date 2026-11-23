@@ -22,6 +22,14 @@ debugger breakpoint.
   gutter, tool window, `Go to Source` and the editor dialog all resolve the anchor on the fly. The
   javaagent also falls back to the statement ordinal when the running class was compiled before
   the edit, so a stale `rules.json` still targets the same statement.
+- **Works on interface / abstract methods and Spring `@Service` beans.** A rule created on such a
+  method is marked as an *interface rule*: there is no method body to instrument there, so the
+  javaagent applies the rule to every concrete class that implements the interface (or extends the
+  abstract base). Spring beans are proxied (CGLIB / JDK dynamic proxy) behind their interface, so
+  without this the call would reach the real implementation untouched and the mock would silently
+  never fire. The agent skips the generated proxy classes themselves (to avoid running a rule
+  twice) and retransforms the already-loaded implementations when a rule is created or edited
+  while the app is running.
 - The gutter only shows a line icon for lines that **already have a rule** (no icon on every
   statement). Click it to edit / enable / disable / delete the rules on that line, or to add
   another one. Existing rules show `@line N` in the tool window.
@@ -99,6 +107,33 @@ stack-map frame). A matching `RETURN` / `THROW` / `SKIP` ends the method at that
 block that falls through returns an internal `CONTINUE` sentinel, so the original body continues
 from that line. It also watches the rules file, so editing a rule while the JVM is running takes
 effect immediately.
+
+### Troubleshooting a rule that does not fire
+
+The agent prints one line to the application console for every class it rewrites:
+
+```
+[DebugMock] agent active, 3 rule(s) from /path/.debugmock/rules.json
+[DebugMock] instrumented demo/UserServiceImpl -> find(Ljava/lang/String;)Ldemo/User;
+```
+
+- No `agent active` line → the JVM was not started with the agent (external `mvn`/`gradle`
+  launch, remote JVM, etc.); use `DebugMock → Copy Agent JVM Options` or an IDE Run/Debug
+  configuration.
+- `rules present but nothing was instrumented` → the rule's class was found but the method
+  name + JVM descriptor did not match the class file. Re-create the rule from that class (the
+  plugin stores the JVM binary name, so nested classes work too).
+- `rule at ... skipped: the line is not a statement start` / `cannot analyse ... for line rules`
+  → move the rule to a plain statement in the method body, or use an entry rule.
+- `interface rule on ...: N implementation(s)` → the agent found the Spring bean implementation
+  and retransformed it.
+
+### Interface / abstract rules
+
+`rules.json` stores `interfaceRule: true` for methods created on an interface or an abstract
+method. The agent applies such a rule to every loaded concrete implementor/subclass, skips
+CGLIB / JDK proxy classes (so the rule never runs twice), and retransforms implementations again
+when the rule is created, changed or deleted at runtime.
 
 ### Condition syntax
 

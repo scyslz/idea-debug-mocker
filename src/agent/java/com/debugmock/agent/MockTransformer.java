@@ -100,7 +100,10 @@ public final class MockTransformer implements ClassFileTransformer {
         try {
             ClassReader reader = new ClassReader(classfileBuffer);
             ClassNode classNode = new ClassNode();
-            reader.accept(classNode, 0);
+            // Expand the original stack-map frames into F_NEW nodes: we insert instructions and
+            // additional frames, and mixing compressed original frames with new ones makes ASM
+            // lose the frame offsets (-> VerifyError "bad offset").
+            reader.accept(classNode, ClassReader.EXPAND_FRAMES);
 
             List<MockRule> applicable = new ArrayList<>();
             if (rules != null) {

@@ -1,0 +1,75 @@
+name: Build and Release Plugin
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build plugin
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build plugin
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            ./gradlew --no-daemon --stacktrace -PpluginVersion="$VERSION" buildPlugin
+          else
+            ./gradlew --no-daemon --stacktrace buildPlugin
+          fi
+
+      - name: Upload plugin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-distribution
+          path: |
+            build/distributions/*.zip
+            build/agent/debugmock-agent.jar
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download plugin zip
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-distribution
+          path: dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: DebugMock ${{ github.ref_name }}
+          files: |
+            dist/*.zip
+            dist/*.jar
+          generate_release_notes: true
+          fail_on_unmatched_files: true

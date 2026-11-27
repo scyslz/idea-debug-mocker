@@ -58,18 +58,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Download plugin zip
+      - name: Download plugin artifacts
         uses: actions/download-artifact@v8
         with:
           name: plugin-distribution
           path: dist
 
+      - name: Collect release files
+        shell: bash
+        run: |
+          mkdir -p release
+          find dist -type f \( -name '*.zip' -o -name '*.jar' \) -exec cp {} release/ \;
+          ls -l release
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
           name: DebugMock ${{ github.ref_name }}
-          files: |
-            dist/*.zip
-            dist/*.jar
+          files: release/*
           generate_release_notes: true
           fail_on_unmatched_files: true

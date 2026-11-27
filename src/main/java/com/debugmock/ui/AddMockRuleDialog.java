@@ -9,24 +9,45 @@ import com.debugmock.psi.MethodInfo;
 import com.debugmock.store.MockRuleStore;
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.editor.event.DocumentEvent;
+import com.intellij.openapi.editor.event.DocumentListener;
 import com.intellij.openapi.ui.DialogWrapper;
+import com.intellij.openapi.ui.ValidationInfo;
+import com.intellij.psi.PsiMethod;
+import com.intellij.psi.PsiParameter;
+import com.intellij.psi.PsiType;
+import com.intellij.ui.components.ActionLink;
 import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.components.JBRadioButton;
 import com.intellij.util.ui.FormBuilder;
 import com.intellij.util.ui.JBUI;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
-import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
-import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
+import java.awt.CardLayout;
+import java.awt.FlowLayout;
+import java.awt.Font;
+import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
 
 /**
- * Dialog for creating / editing a mock rule. Two Java code editors (Condition and Value/Statement)
- * keep a fixed width and can be expanded; switching the Action only changes the placeholder, never
- * the control layout. All value semantics are expressed as real Java code compiled by the IDE.
+ * Dialog for creating / editing a mock rule.
+ *
+ * <p>Layout: a compact header (which method / where), the Action as a row of radio buttons with a
+ * one-line explanation, an "Every call / Only when" choice for the condition, and a value area
+ * whose label, placeholder and quick-fill links follow the chosen Action. The condition and value
+ * areas are card panels, so switching options never changes the dialog's size. A live preview
+ * sentence summarises what the rule will do. All value semantics are still real Java code compiled
+ * by the IDE.</p>
  */
 public class AddMockRuleDialog extends DialogWrapper {
 
@@ -34,7 +55,25 @@ public class AddMockRuleDialog extends DialogWrapper {
     private final MockRule existing;
     private final Project project;
 
-    private final JComboBox<MockAction> actionCombo = new JComboBox<>(MockAction.values());
+    private static final String CARD_ALWAYS = "always";
+    private static final String CARD_WHEN = "when";
+    private static final String CARD_EDITOR = "editor";
+    private static final String CARD_NONE = "none";
+
+    /** One radio button per available action, in enum order (RETURN, THROW, SKIP, EXECUTE). */
+    private final Map<MockAction, JBRadioButton> actionButtons = new EnumMap<>(MockAction.class);
+    private final JBRadioButton conditionAlways = new JBRadioButton("Every call");
+    private final JBRadioButton conditionOnlyWhen = new JBRadioButton("Only when");
+    private final StatementEditorUtil.CodeDocument conditionDoc;
+    private final StatementEditorUtil.CodeDocument valueDoc;
+    private final CardLayout conditionCards = new CardLayout();
+    private final JPanel conditionCardPanel = new JPanel(conditionCards);
+    private final CardLayout valueCards = new CardLayout();
+    private final JPanel valueCardPanel = new JPanel(valueCards);
+    private final JPanel quickFillPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+    private final JBLabel actionDescription = hint("");
+    private final JBLabel valueLabel = new JBLabel();
+    private final JBLabel summaryLabel = hint("");
     private final ExpandableCodeField conditionField;
     private final ExpandableCodeField valueField;
     private final JCheckBox enabledBox = new JCheckBox("Enabled", true);
@@ -87,40 +126,31 @@ public class AddMockRuleDialog extends DialogWrapper {
 
         // Both factories read PSI to build the editor's code-fragment context; the dialog is
         // constructed on the EDT, so those reads must run inside a read action.
-        conditionField = new ExpandableCodeField(project, ReadAction.compute(() ->
+        conditionDoc = ReadAction.compute(() ->
                 StatementEditorUtil.createCondition(project, methodInfo,
-                        existing == null ? "" : existing.getCondition(), lineNumber)));
-        valueField = new ExpandableCodeField(project, ReadAction.compute(() ->
-                StatementEditorUtil.createBlock(project, methodInfo, initialValue(), lineNumber)));
+                        existing == null ? "" : existing.getCondition(), lineNumber));
+        conditionField = new ExpandableCodeField(project, conditionDoc);
+        valueDoc = ReadAction.compute(() ->
+                StatementEditorUtil.createBlock(project, methodInfo, initialValue(), lineNumber));
+        valueField = new ExpandableCodeField(project, valueDoc);
 
         setTitle(existing == null ? "Add Mock Rule" : "Edit Mock Rule");
         setOKButtonText(existing == null ? "Create" : "Save");
         enabledBox.setSelected(existing == null || existing.isEnabled());
+        boolean hasCondition = existing != null && existing.hasCondition();
+        conditionOnlyWhen.setSelected(hasCondition);
+        conditionAlways.setSelected(!hasCondition);
         init();
     }
 
     @Override
     protected @Nullable JComponent createCenterPanel() {
-        JTextField classField = readOnlyField(methodInfo.getClassName());
-        JTextField methodField = readOnlyField(methodInfo.getMethodName() + "()");
-        JTextField signatureField = readOnlyField(methodInfo.getSignature());
-        JTextField lineField = readOnlyField(lineNumber > 0
-                ? String.valueOf(lineNumber) : "0  (method entry)");
-
-        // Only SKIP is excluded for non-void; everything else is a Java block.
-        if (!methodInfo.isVoidReturn()) {
-            actionCombo.removeItem(MockAction.SKIP);
-        }
         MockAction initial = preselectedAction != null ? preselectedAction
                 : existing != null ? existing.getAction()
                 : (methodInfo.isVoidReturn() ? MockAction.SKIP : MockAction.RETURN);
-        if (initial != null) {
-            actionCombo.setSelectedItem(initial);
-        }
-        updatePlaceholder();
-        actionCombo.addActionListener(e -> updatePlaceholder());
+        JPanel actionRow = buildActionRow(initial);
 
-        conditionField.setPlaceholder("Optional Java boolean expression, e.g. name != null && id > 5");
+        conditionField.setPlaceholder("Java boolean expression, e.g.  name != null && id > 5");
         jsonButton.setToolTipText("Insert a JSON skeleton of the return type, then fill in the values");
         jsonButton.addActionListener(e -> insertJsonSkeleton());
         // North-anchored so the button keeps its own height when the editor is expanded.
@@ -131,18 +161,319 @@ public class AddMockRuleDialog extends DialogWrapper {
         valueRow.add(valueField, BorderLayout.CENTER);
         valueRow.add(jsonHolder, BorderLayout.EAST);
 
-        FormBuilder builder = FormBuilder.createFormBuilder();
-        builder.addLabeledComponent("Class", classField);
-        builder.addLabeledComponent("Method", methodField);
-        builder.addLabeledComponent("Signature", signatureField);
-        builder.addLabeledComponent("Line", lineField);
-        builder.addLabeledComponent("Condition", conditionField);
-        builder.addLabeledComponent("Action", actionCombo);
-        builder.addLabeledComponent("Value / Code", valueRow);
+        quickFillPanel.setOpaque(false);
+        JPanel editorCard = new JPanel(new BorderLayout(0, 2));
+        editorCard.setOpaque(false);
+        editorCard.add(valueRow, BorderLayout.CENTER);
+        editorCard.add(quickFillPanel, BorderLayout.SOUTH);
+        JBLabel nothing = hint("Nothing to enter: the original method body is skipped.");
+        nothing.setVerticalAlignment(javax.swing.SwingConstants.TOP);
+        valueCardPanel.setOpaque(false);
+        valueCardPanel.add(editorCard, CARD_EDITOR);
+        valueCardPanel.add(nothing, CARD_NONE);
+
         hintLabel = hint(hintText());
-        builder.addComponent(hintLabel);
-        builder.addComponent(bottomRow());
+        summaryLabel.setBorder(com.intellij.util.ui.JBUI.Borders.empty(2, 0));
+
+        // Keep the preview sentence in sync with what is typed.
+        DocumentListener preview = new DocumentListener() {
+            @Override
+            public void documentChanged(@NotNull DocumentEvent event) {
+                updateSummary();
+            }
+        };
+        conditionDoc.getDocument().addDocumentListener(preview, getDisposable());
+        valueDoc.getDocument().addDocumentListener(preview, getDisposable());
+
+        FormBuilder builder = FormBuilder.createFormBuilder();
+        builder.addComponent(buildHeader());
+        builder.addComponent(sectionLabel("What should happen"), 12);
+        builder.addComponent(actionRow, 4);
+        builder.addComponent(actionDescription, 2);
+        builder.addComponent(sectionLabel("When"), 12);
+        builder.addComponent(buildConditionSection(), 4);
+        builder.addComponent(valueLabel, 12);
+        builder.addComponent(valueCardPanel, 4);
+        builder.addComponent(hintLabel, 4);
+        builder.addComponent(summaryLabel, 12);
+        builder.addComponent(bottomRow(), 8);
+
+        onActionChanged(false);
+        onConditionChanged(conditionOnlyWhen.isSelected(), false);
         return builder.getPanel();
+    }
+
+    // ---- layout pieces -----------------------------------------------------------------------
+
+    /** Method name with parameter types, plus class and line, instead of four read-only fields. */
+    private JComponent buildHeader() {
+        JBLabel title = new JBLabel(methodDisplay());
+        title.setFont(title.getFont().deriveFont(Font.BOLD));
+        title.setToolTipText(methodInfo.getClassName() + "#" + methodInfo.getMethodName()
+                + methodInfo.getSignature());
+        String where = methodInfo.getClassName() + "   \u00b7   "
+                + (lineNumber > 0 ? "line " + lineNumber : "method entry");
+        JPanel panel = new JPanel(new BorderLayout(0, 2));
+        panel.setOpaque(false);
+        panel.add(title, BorderLayout.NORTH);
+        panel.add(hint(where), BorderLayout.SOUTH);
+        return panel;
+    }
+
+    /** {@code getOrder(Long id) : Order}, falling back to the bare name when PSI cannot resolve. */
+    private String methodDisplay() {
+        try {
+            return ReadAction.compute(() -> {
+                PsiMethod method = methodInfo.getMethod();
+                StringBuilder sb = new StringBuilder(method.getName()).append('(');
+                PsiParameter[] parameters = method.getParameterList().getParameters();
+                for (int i = 0; i < parameters.length; i++) {
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(parameters[i].getType().getPresentableText())
+                            .append(' ').append(parameters[i].getName());
+                }
+                sb.append(')');
+                PsiType returnType = method.getReturnType();
+                if (returnType != null) {
+                    sb.append(" : ").append(returnType.getPresentableText());
+                }
+                return sb.toString();
+            });
+        } catch (RuntimeException e) {
+            return methodInfo.getMethodName() + "()";
+        }
+    }
+
+    private static JBLabel sectionLabel(String text) {
+        JBLabel label = new JBLabel(text);
+        label.setFont(label.getFont().deriveFont(Font.BOLD));
+        return label;
+    }
+
+    private JPanel buildActionRow(MockAction initial) {
+        ButtonGroup group = new ButtonGroup();
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 0));
+        row.setOpaque(false);
+        for (MockAction action : MockAction.values()) {
+            // Skipping a body only makes sense for a method that returns nothing.
+            if (action == MockAction.SKIP && !methodInfo.isVoidReturn()) {
+                continue;
+            }
+            JBRadioButton button = new JBRadioButton(actionTitle(action));
+            button.setToolTipText(actionExplanation(action));
+            button.addActionListener(e -> onActionChanged(true));
+            group.add(button);
+            row.add(button);
+            actionButtons.put(action, button);
+        }
+        JBRadioButton pick = actionButtons.get(initial);
+        if (pick == null) {
+            pick = actionButtons.values().iterator().next();
+        }
+        pick.setSelected(true);
+        return row;
+    }
+
+    /** "Every call" / "Only when": the condition editor only appears when it is needed. */
+    private JComponent buildConditionSection() {
+        ButtonGroup group = new ButtonGroup();
+        group.add(conditionAlways);
+        group.add(conditionOnlyWhen);
+        conditionAlways.addActionListener(e -> onConditionChanged(false, true));
+        conditionOnlyWhen.addActionListener(e -> onConditionChanged(true, true));
+        JPanel radios = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 0));
+        radios.setOpaque(false);
+        radios.add(conditionAlways);
+        radios.add(conditionOnlyWhen);
+
+        JBLabel always = hint("The rule applies every time this code runs.");
+        always.setVerticalAlignment(javax.swing.SwingConstants.TOP);
+        conditionCardPanel.setOpaque(false);
+        conditionCardPanel.add(always, CARD_ALWAYS);
+        conditionCardPanel.add(conditionField, CARD_WHEN);
+
+        JPanel panel = new JPanel(new BorderLayout(0, 4));
+        panel.setOpaque(false);
+        panel.add(radios, BorderLayout.NORTH);
+        panel.add(conditionCardPanel, BorderLayout.CENTER);
+        return panel;
+    }
+
+    // ---- interaction ---------------------------------------------------------------------------
+
+    private MockAction selectedAction() {
+        for (Map.Entry<MockAction, JBRadioButton> entry : actionButtons.entrySet()) {
+            if (entry.getValue().isSelected()) {
+                return entry.getKey();
+            }
+        }
+        return MockAction.RETURN;
+    }
+
+    private void onConditionChanged(boolean onlyWhen, boolean userInitiated) {
+        conditionCards.show(conditionCardPanel, onlyWhen ? CARD_WHEN : CARD_ALWAYS);
+        if (onlyWhen && userInitiated) {
+            SwingUtilities.invokeLater(() -> conditionField.getField().requestFocusInWindow());
+        }
+        updateSummary();
+    }
+
+    private static String actionTitle(MockAction action) {
+        switch (action) {
+            case THROW:
+                return "Throw exception";
+            case SKIP:
+                return "Skip method";
+            case EXECUTE:
+                return "Run code";
+            default:
+                return "Return value";
+        }
+    }
+
+    private static String actionExplanation(MockAction action) {
+        switch (action) {
+            case THROW:
+                return "The method throws your exception; its original body does not run.";
+            case SKIP:
+                return "The original method body is skipped and the method returns immediately.";
+            case EXECUTE:
+                return "Your code runs here, then the original code continues "
+                        + "(unless your code returns or throws).";
+            default:
+                return "The method returns your value; its original body does not run.";
+        }
+    }
+
+    /** Quick-fill snippets {label, code} that fit the action and the method's return type. */
+    private List<String[]> quickFills(MockAction action) {
+        List<String[]> fills = new ArrayList<>();
+        if (action == MockAction.THROW) {
+            fills.add(new String[]{"RuntimeException", "new RuntimeException(\"mock error\")"});
+            fills.add(new String[]{"IllegalStateException", "new IllegalStateException(\"mock error\")"});
+            fills.add(new String[]{"IllegalArgumentException", "new IllegalArgumentException(\"mock error\")"});
+        } else if (action == MockAction.EXECUTE) {
+            fills.add(new String[]{"print", "System.out.println(\"DebugMock hit\");"});
+        } else if (action == MockAction.RETURN) {
+            String type = methodInfo.getReturnType();
+            if (type == null) {
+                return fills;
+            }
+            switch (type) {
+                case "Z":
+                    fills.add(new String[]{"true", "true"});
+                    fills.add(new String[]{"false", "false"});
+                    break;
+                case "B": case "S": case "I": case "J": case "F": case "D":
+                    fills.add(new String[]{"0", "0"});
+                    break;
+                case "Ljava/lang/String;":
+                    fills.add(new String[]{"\"\"", "\"\""});
+                    fills.add(new String[]{"null", "null"});
+                    break;
+                case "Ljava/util/List;":
+                    fills.add(new String[]{"empty list", "java.util.Collections.emptyList()"});
+                    fills.add(new String[]{"null", "null"});
+                    break;
+                case "Ljava/util/Set;":
+                    fills.add(new String[]{"empty set", "java.util.Collections.emptySet()"});
+                    fills.add(new String[]{"null", "null"});
+                    break;
+                case "Ljava/util/Map;":
+                    fills.add(new String[]{"empty map", "java.util.Collections.emptyMap()"});
+                    fills.add(new String[]{"null", "null"});
+                    break;
+                case "Ljava/util/Optional;":
+                    fills.add(new String[]{"Optional.empty()", "java.util.Optional.empty()"});
+                    fills.add(new String[]{"null", "null"});
+                    break;
+                default:
+                    if (type.startsWith("L") || type.startsWith("[")) {
+                        fills.add(new String[]{"null", "null"});
+                    }
+                    break;
+            }
+        }
+        return fills;
+    }
+
+    private void rebuildQuickFills(MockAction action) {
+        quickFillPanel.removeAll();
+        List<String[]> fills = quickFills(action);
+        if (!fills.isEmpty()) {
+            quickFillPanel.add(hint("Quick fill:"));
+            for (String[] fill : fills) {
+                ActionLink link = new ActionLink(fill[0], e -> {
+                    valueField.setText(fill[1]);
+                    valueField.getField().requestFocusInWindow();
+                });
+                link.setToolTipText(fill[1]);
+                quickFillPanel.add(link);
+            }
+        }
+        quickFillPanel.revalidate();
+        quickFillPanel.repaint();
+    }
+
+    /** One-sentence preview of what the rule will do, updated while the user types. */
+    private void updateSummary() {
+        MockAction action = selectedAction();
+        String condition = conditionOnlyWhen.isSelected() ? abbreviate(conditionField.getText()) : "";
+        String code = abbreviate(valueField.getText());
+        if (code.startsWith("return ")) {
+            code = code.substring("return ".length());
+        }
+        String what;
+        switch (action) {
+            case SKIP:
+                what = "skip the original method body";
+                break;
+            case THROW:
+                what = code.isEmpty() ? "throw the exception you enter" : "throw " + code;
+                break;
+            case EXECUTE:
+                what = (code.isEmpty() ? "run your code" : "run " + code)
+                        + (lineNumber > 0 ? " at line " + lineNumber : " at method entry");
+                break;
+            default:
+                what = code.isEmpty() ? "return the value you enter" : "return " + code;
+                break;
+        }
+        String when = condition.isEmpty() ? "Every call" : "When " + condition;
+        summaryLabel.setText("Preview:  " + when + "  \u2192  " + what);
+    }
+
+    private static String abbreviate(String text) {
+        if (text == null) {
+            return "";
+        }
+        String oneLine = text.replaceAll("\\s+", " ").trim();
+        return oneLine.length() > 64 ? oneLine.substring(0, 64) + "..." : oneLine;
+    }
+
+    @Override
+    public @Nullable JComponent getPreferredFocusedComponent() {
+        return selectedAction() == MockAction.SKIP ? actionButtons.get(MockAction.SKIP)
+                : valueField.getField();
+    }
+
+    /** Inline validation: the message appears next to the offending editor instead of at the end. */
+    @Override
+    protected @Nullable ValidationInfo doValidate() {
+        MockAction action = selectedAction();
+        if (conditionOnlyWhen.isSelected() && conditionField.getText().trim().isEmpty()) {
+            return new ValidationInfo("Enter a condition, or choose \"Every call\".",
+                    conditionField.getField());
+        }
+        if (action != MockAction.SKIP && valueField.getText().trim().isEmpty()) {
+            String message = action == MockAction.THROW ? "Enter the exception to throw."
+                    : action == MockAction.EXECUTE ? "Enter the code to run."
+                    : "Enter the value to return.";
+            return new ValidationInfo(message, valueField.getField());
+        }
+        return null;
     }
 
     /** Enabled switch for every rule; Delete only when editing an existing rule. */
@@ -179,23 +510,41 @@ public class AddMockRuleDialog extends DialogWrapper {
         return label;
     }
 
-    /** Switching Action changes only the hint, not the editor control. */
-    private void updatePlaceholder() {
-        MockAction action = (MockAction) actionCombo.getSelectedItem();
+    /**
+     * Applies everything that depends on the chosen Action: label, placeholder, which card is
+     * shown, quick-fill links, the JSON helper and the preview. Cards keep the dialog size stable.
+     */
+    private void onActionChanged(boolean userInitiated) {
+        MockAction action = selectedAction();
+        actionDescription.setText(actionExplanation(action));
+        valueLabel.setText(action == MockAction.THROW ? "Exception to throw"
+                : action == MockAction.EXECUTE ? "Code to run"
+                : action == MockAction.SKIP ? "Value" : "Value to return");
+        valueLabel.setFont(valueLabel.getFont().deriveFont(Font.BOLD));
+
         if (action == MockAction.SKIP) {
-            valueField.setPlaceholder("No value — the original method body is skipped.");
-        } else if (action == MockAction.THROW) {
-            valueField.setPlaceholder("Java expression, e.g.  new BizException(\"invalid id\")   (you may also write the full throw statement)");
-        } else if (action == MockAction.EXECUTE) {
-            valueField.setPlaceholder("Java code block, e.g.  System.out.println(name); return \"done\";");
+            valueCards.show(valueCardPanel, CARD_NONE);
         } else {
-            valueField.setPlaceholder("Java value or JSON, e.g.  \"mock-name\"  /  42  /  { \"id\": 1 }  /  return \"x\";");
+            valueCards.show(valueCardPanel, CARD_EDITOR);
+            if (action == MockAction.THROW) {
+                valueField.setPlaceholder("Java expression, e.g.  new BizException(\"invalid id\")   "
+                        + "(you may also write the full throw statement)");
+            } else if (action == MockAction.EXECUTE) {
+                valueField.setPlaceholder("Java code block, e.g.  System.out.println(name); return \"done\";");
+            } else {
+                valueField.setPlaceholder("Java value or JSON, e.g.  \"mock-name\"  /  42  /  { \"id\": 1 }  /  return \"x\";");
+            }
+            if (userInitiated) {
+                SwingUtilities.invokeLater(() -> valueField.getField().requestFocusInWindow());
+            }
         }
         boolean jsonExample = action == MockAction.RETURN && supportsJsonExample();
         jsonButton.setVisible(jsonExample);
+        rebuildQuickFills(action);
         if (hintLabel != null) {
             hintLabel.setText(hintText());
         }
+        updateSummary();
     }
 
     /** Variables in scope, plus a note when a JSON example can be used for the value. */
@@ -203,7 +552,7 @@ public class AddMockRuleDialog extends DialogWrapper {
         String available = "Available: " + ReadAction.compute(() -> ExecutionContext.of(methodInfo,
                 com.debugmock.psi.LocalVariables.inScope(methodInfo.getMethod(), lineNumber))
                 .variablesHint());
-        if (actionCombo.getSelectedItem() == MockAction.RETURN && supportsJsonExample()) {
+        if (selectedAction() == MockAction.RETURN && supportsJsonExample()) {
             return available + "   ·   JSON is turned into Java on save";
         }
         return available;
@@ -249,7 +598,7 @@ public class AddMockRuleDialog extends DialogWrapper {
 
     @Override
     protected void doOKAction() {
-        MockAction action = (MockAction) actionCombo.getSelectedItem();
+        MockAction action = selectedAction();
         String code = valueField.getText().trim();
 
         rawJsonReturn = isJsonReturn(action, code);
@@ -384,10 +733,11 @@ public class AddMockRuleDialog extends DialogWrapper {
                         methodInfo.getSignature(), methodInfo.getReturnType())
                 : copyOf(existing);
 
-        MockAction action = (MockAction) actionCombo.getSelectedItem();
+        MockAction action = selectedAction();
         rule.setAction(action);
         rule.setEnabled(enabledBox.isSelected());
-        rule.setCondition(conditionField.getText().trim());
+        // "Every call" means no condition, even if text is still sitting in the hidden editor.
+        rule.setCondition(conditionOnlyWhen.isSelected() ? conditionField.getText().trim() : "");
         rule.setLineNumber(lineNumber);
         // An interface / abstract method has no body at runtime: the agent must apply the rule to
         // the implementations (Spring beans are usually proxied behind their interface or base).
@@ -447,13 +797,6 @@ public class AddMockRuleDialog extends DialogWrapper {
         copy.setCreatedAt(source.getCreatedAt());
         copy.setEnabled(source.isEnabled());
         return copy;
-    }
-
-    private static JTextField readOnlyField(String text) {
-        JTextField field = new JTextField(text);
-        field.setEditable(false);
-        field.setFocusable(false);
-        return field;
     }
 
     /** Shows the dialog and returns the configured rule, or null if cancelled. */

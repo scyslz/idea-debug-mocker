@@ -24,12 +24,13 @@ import java.util.List;
 import java.util.function.Supplier;
 
 /**
- * Gutter icon next to Java method declarations. Clicking lists the method's rules (edit /
- * enable / disable / delete) and offers a shortcut to add a new one.
+ * Gutter icon next to Java method declarations that already have at least one mock rule.
+ * Clicking lists the method's rules (edit / enable / disable / delete) and offers a shortcut to
+ * add another one. Methods without rules get no icon, so the gutter stays clean; create a rule
+ * from the editor context menu ({@code DebugMock → Add Mock Rule}) or the tool window.
  */
 public class MockMethodLineMarkerProvider implements LineMarkerProvider {
 
-    private static final Icon ADD_ICON = loadIcon("/icons/mock-add.svg");
     private static final Icon RULE_ICON = loadIcon("/icons/mock-rule.svg");
 
     private static Icon loadIcon(String path) {
@@ -55,13 +56,17 @@ public class MockMethodLineMarkerProvider implements LineMarkerProvider {
         }
         List<MockRule> rules = MockRuleStore.getInstance().findAll(
                 element.getProject(), info.getClassName(), info.getMethodName(), info.getSignature());
-        Icon icon = rules.isEmpty() ? ADD_ICON : RULE_ICON;
+        if (rules.isEmpty()) {
+            // Methods without a rule stay clean: no gutter icon on every declaration.
+            // A new rule is added from the editor context menu or the DebugMock tool window.
+            return null;
+        }
 
         return new LineMarkerInfo<>(
                 element,
                 TextRange.from(element.getTextRange().getStartOffset(), 0),
-                icon,
-                e -> "DebugMock: " + (rules.isEmpty() ? "Add mock rule" : rules.size() + " mock rule(s)"),
+                RULE_ICON,
+                e -> "DebugMock: " + rules.size() + " mock rule(s)",
                 (mouseEvent, psiElement) -> showRules(mouseEvent, psiElement.getProject(), info),
                 Alignment.RIGHT,
                 (Supplier<String>) () -> "DebugMock gutter icon"

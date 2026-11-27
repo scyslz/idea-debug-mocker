@@ -18,6 +18,7 @@ public final class MockAgent {
     private static volatile Path rulesFile;
     private static volatile MockTransformer currentTransformer;
     private static volatile long lastModified;
+    private static volatile long lastSize;
 
     private MockAgent() {
     }
@@ -27,6 +28,7 @@ public final class MockAgent {
         if (rulesPath == null || rulesPath.trim().isEmpty()) {
             rulesPath = args;
         }
+        rulesPath = unquote(rulesPath);
         if (rulesPath == null || rulesPath.trim().isEmpty()) {
             System.err.println("[DebugMock] agent started without a rules file; no mocks applied. "
                     + "Pass -D" + RULES_PROPERTY + "=<path>/rules.json");
@@ -39,8 +41,10 @@ public final class MockAgent {
         // Remember the current timestamp so the watcher does not immediately reload the same file.
         try {
             lastModified = Files.getLastModifiedTime(rulesFile).toMillis();
+            lastSize = Files.size(rulesFile);
         } catch (Exception ignored) {
             lastModified = 0;
+            lastSize = 0;
         }
 
         // Hot reload: react to rules created/edited while the JVM is running, so a rule takes
@@ -48,6 +52,19 @@ public final class MockAgent {
         Thread watcher = new Thread(MockAgent::watchRules, "debugmock-rules-watcher");
         watcher.setDaemon(true);
         watcher.start();
+    }
+
+    /** The IDE-side "Copy agent options" text quotes paths for a shell; accept that form too. */
+    private static String unquote(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (trimmed.length() >= 2 && trimmed.charAt(0) == '"'
+                && trimmed.charAt(trimmed.length() - 1) == '"') {
+            return trimmed.substring(1, trimmed.length() - 1);
+        }
+        return trimmed;
     }
 
     private static void applyRules(List<MockRule> rules) {
@@ -143,9 +160,19 @@ public final class MockAgent {
                     continue;
                 }
                 long modified = Files.getLastModifiedTime(rulesFile).toMillis();
-                if (modified != lastModified) {
+                long size = Files.size(rulesFile);
+                // Size is checked too: some file systems only have a 1-2 second timestamp resolution.
+                if (modified != lastModified || size != lastSize) {
                     lastModified = modified;
-                    applyRules(RuleLoader.load(rulesFile));
+                    lastSize = size;
+                    List<MockRule> rules = RuleLoader.read(rulesFile);
+                    if (rules == null) {
+                        // Blank / half-written / invalid file: do not drop the active mocks.
+                        System.err.println("[DebugMock] rules file is not readable right now; "
+                                + "keeping the previous rules");
+                        continue;
+                    }
+                    applyRules(rules);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

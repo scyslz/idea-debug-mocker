@@ -20,6 +20,13 @@ import org.jetbrains.annotations.NotNull;
  */
 public class AddExecuteAction extends AnAction {
 
+    @Override
+    @NotNull
+    public com.intellij.openapi.actionSystem.ActionUpdateThread getActionUpdateThread() {
+        // update() resolves PSI and reads the rules store: keep that off the UI thread.
+        return com.intellij.openapi.actionSystem.ActionUpdateThread.BGT;
+    }
+
     public AddExecuteAction() {
         // Text/description come from plugin.xml so the same class can be registered both in the
         // DebugMock submenu and as a top-level "Add DebugMock Rule at This Line" action.

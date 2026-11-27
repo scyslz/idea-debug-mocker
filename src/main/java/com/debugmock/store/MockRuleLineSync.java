@@ -44,7 +44,7 @@ public final class MockRuleLineSync {
 
     public MockRuleLineSync(@NotNull Project project) {
         this.project = project;
-        this.alarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, project);
+        this.alarm = new Alarm(Alarm.ThreadToUse.POOLED_THREAD, project);
         PsiManager.getInstance(project).addPsiTreeChangeListener(new PsiTreeChangeAdapter() {
             @Override
             public void childAdded(@NotNull PsiTreeChangeEvent event) {
@@ -129,54 +129,54 @@ public final class MockRuleLineSync {
     }
 
     private void syncRules(Set<VirtualFile> files) {
-        List<MockRule> rules = MockRuleStore.getInstance().load(project);
-        boolean changed = false;
-        for (MockRule rule : rules) {
-            PsiMethod method = findMethod(rule, files);
-            if (method == null) {
-                continue;
-            }
-            boolean ruleChanged = false;
-            // Backfill the interface flag for rules created before it existed: interface
-            // methods have no body, so the agent has to instrument the implementors.
-            if (!rule.isInterfaceRule()) {
-                com.intellij.psi.PsiClass owner = method.getContainingClass();
-                if ((owner != null && owner.isInterface()) || method.getBody() == null) {
-                    rule.setInterfaceRule(true);
-                    ruleChanged = true;
+        // One atomic read-modify-write: a rule saved from the editor while this runs is not lost.
+        MockRuleStore.getInstance().update(project, rules -> {
+            boolean changed = false;
+            for (MockRule rule : rules) {
+                PsiMethod method = findMethod(rule, files);
+                if (method == null) {
+                    continue;
                 }
-            }
-            if (ruleChanged) {
+                boolean ruleChanged = false;
+                // Backfill the interface flag for rules created before it existed: interface
+                // methods have no body, so the agent has to instrument the implementors.
+                if (!rule.isInterfaceRule()) {
+                    com.intellij.psi.PsiClass owner = method.getContainingClass();
+                    if ((owner != null && owner.isInterface()) || method.getBody() == null) {
+                        rule.setInterfaceRule(true);
+                        ruleChanged = true;
+                    }
+                }
+                if (ruleChanged) {
+                    rule.setUpdatedAt(System.currentTimeMillis());
+                    changed = true;
+                }
+                if (rule.getLineNumber() <= 0) {
+                    continue;
+                }
+                int resolved = RuleLines.resolve(rule, method);
+                if (resolved <= 0) {
+                    continue;
+                }
+                boolean lineMoved = resolved != rule.getLineNumber();
+                boolean needsAnchor = !rule.hasLineAnchor() || rule.getLineOrdinal() < 0;
+                if (!lineMoved && !needsAnchor) {
+                    continue;
+                }
+                String anchor = RuleLines.anchorFor(method, resolved);
+                int ordinal = RuleLines.ordinalFor(method, resolved);
+                if (anchor == null || ordinal < 0) {
+                    // Not a statement start (e.g. the anchor statement was deleted): leave it.
+                    continue;
+                }
+                rule.setLineNumber(resolved);
+                rule.setLineAnchor(anchor);
+                rule.setLineOrdinal(ordinal);
                 rule.setUpdatedAt(System.currentTimeMillis());
                 changed = true;
             }
-            if (rule.getLineNumber() <= 0) {
-                continue;
-            }
-            int resolved = RuleLines.resolve(rule, method);
-            if (resolved <= 0) {
-                continue;
-            }
-            boolean lineMoved = resolved != rule.getLineNumber();
-            boolean needsAnchor = !rule.hasLineAnchor() || rule.getLineOrdinal() < 0;
-            if (!lineMoved && !needsAnchor) {
-                continue;
-            }
-            String anchor = RuleLines.anchorFor(method, resolved);
-            int ordinal = RuleLines.ordinalFor(method, resolved);
-            if (anchor == null || ordinal < 0) {
-                // Not a statement start (e.g. the anchor statement was deleted): leave it.
-                continue;
-            }
-            rule.setLineNumber(resolved);
-            rule.setLineAnchor(anchor);
-            rule.setLineOrdinal(ordinal);
-            rule.setUpdatedAt(System.currentTimeMillis());
-            changed = true;
-        }
-        if (changed) {
-            MockRuleStore.getInstance().save(project, rules);
-        }
+            return changed;
+        });
     }
 
     private PsiMethod findMethod(MockRule rule, Set<VirtualFile> files) {

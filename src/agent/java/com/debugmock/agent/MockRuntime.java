@@ -129,8 +129,13 @@ public final class MockRuntime {
         }
     }
 
-    /** Compiled rule classes, keyed by class name + source so a rule change picks a fresh class. */
-    private static final Map<String, Class<?>> COMPILED = new HashMap<String, Class<?>>();
+    /**
+     * Compiled rule classes, per parent class loader and keyed by class name + source. A class is
+     * bound to the loader it was defined in, so apps with several loaders (Spring Boot devtools
+     * restarts, servlet containers) must not share one cached class between them.
+     */
+    private static final Map<ClassLoader, Map<String, Class<?>>> COMPILED =
+            new java.util.IdentityHashMap<ClassLoader, Map<String, Class<?>>>();
 
     /** Drops all cached rule classes, e.g. when the rules file was edited while the JVM runs. */
     public static void clearCompiledCache() {
@@ -200,8 +205,17 @@ public final class MockRuntime {
     /** Returns the cached class for a rule, compiling or decoding its bytes on first use. */
     private static Class<?> compiledClass(String base64, String source, String className) {
         String key = className + "\n" + (source == null ? "" : source);
+        ClassLoader parent = Thread.currentThread().getContextClassLoader();
+        if (parent == null) {
+            parent = MockRuntime.class.getClassLoader();
+        }
         synchronized (COMPILED) {
-            Class<?> cached = COMPILED.get(key);
+            Map<String, Class<?>> perLoader = COMPILED.get(parent);
+            if (perLoader == null) {
+                perLoader = new HashMap<String, Class<?>>();
+                COMPILED.put(parent, perLoader);
+            }
+            Class<?> cached = perLoader.get(key);
             if (cached != null) {
                 return cached;
             }
@@ -218,10 +232,6 @@ public final class MockRuntime {
                     throw new IllegalArgumentException("Invalid compiled bytecode", e);
                 }
             }
-            ClassLoader parent = Thread.currentThread().getContextClassLoader();
-            if (parent == null) {
-                parent = MockRuntime.class.getClassLoader();
-            }
             Class<?> clazz;
             try {
                 clazz = new ByteArrayClassLoader(parent).defineClass(className, bytes);
@@ -230,7 +240,7 @@ public final class MockRuntime {
                         + "newer Java than this JVM (" + System.getProperty("java.version")
                         + "); re-save the rule in the IDE so it is recompiled", e);
             }
-            COMPILED.put(key, clazz);
+            perLoader.put(key, clazz);
             return clazz;
         }
     }

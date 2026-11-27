@@ -18,6 +18,13 @@ import java.awt.datatransfer.StringSelection;
 public class CopyAgentOptionsAction extends AnAction {
 
     @Override
+    @NotNull
+    public com.intellij.openapi.actionSystem.ActionUpdateThread getActionUpdateThread() {
+        // update() resolves PSI and reads the rules store: keep that off the UI thread.
+        return com.intellij.openapi.actionSystem.ActionUpdateThread.BGT;
+    }
+
+    @Override
     public void actionPerformed(@NotNull AnActionEvent event) {
         Project project = event.getProject();
         if (project == null) {

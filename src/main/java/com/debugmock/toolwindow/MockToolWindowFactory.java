@@ -17,9 +17,9 @@ import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.Separator;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.editor.Document;
-import com.intellij.openapi.editor.colors.EditorColorsManager;
 import com.intellij.openapi.fileEditor.OpenFileDescriptor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.IconLoader;
@@ -29,9 +29,11 @@ import com.intellij.openapi.wm.ToolWindowFactory;
 import com.intellij.psi.PsiDocumentManager;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.PsiMethod;
+import com.intellij.ui.ColoredTreeCellRenderer;
+import com.intellij.ui.SimpleTextAttributes;
 import com.intellij.ui.components.JBScrollPane;
+import com.intellij.ui.treeStructure.Tree;
 import com.intellij.util.ui.JBUI;
-import com.intellij.util.ui.UIUtil;
 import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
 import com.intellij.util.messages.MessageBusConnection;
@@ -43,10 +45,8 @@ import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JTree;
-import javax.swing.UIManager;
 import javax.swing.SwingUtilities;
 import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.DefaultTreeCellRenderer;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 import java.awt.BorderLayout;
@@ -97,63 +97,20 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         private final Project project;
         private final DefaultMutableTreeNode root = new DefaultMutableTreeNode("Mock Rules");
         private final DefaultTreeModel treeModel = new DefaultTreeModel(root);
-        private final JTree tree = new JTree(treeModel) {
-            @Override
-            public Color getBackground() {
-                // The LAF installs a generic grey background (#3C3F41) on a plain JTree.
-                // Force the IDE colour-scheme background so rows are cleared with that instead.
-                Color bg = EditorColorsManager.getInstance()
-                        .getGlobalScheme().getDefaultBackground();
-                return bg == null ? super.getBackground() : bg;
-            }
-
-            /** Highlight the whole selected row instead of marking it with a slim bar. */
-            @Override
-            protected void paintComponent(java.awt.Graphics g) {
-                TreePath path = getSelectionPath();
-                int row = path == null ? -1 : getRowForPath(path);
-                if (row >= 0) {
-                    java.awt.Rectangle bounds = getRowBounds(row);
-                    if (bounds != null && bounds.width > 0) {
-                        java.awt.Color old = g.getColor();
-                        g.setColor(UIUtil.getTreeSelectionBackground(true));
-                        g.fillRect(0, bounds.y, getWidth(), bounds.height);
-                        g.setColor(old);
-                    }
-                }
-                // Let the panel behind paint the normal background; otherwise the tree would
-                // clear our row highlight before the renderer draws the text on top of it.
-                boolean wasOpaque = isOpaque();
-                setOpaque(false);
-                try {
-                    super.paintComponent(g);
-                } finally {
-                    setOpaque(wasOpaque);
-                }
-            }
-        };
+        private final Tree tree = new Tree(treeModel);
         private final ActionToolbar toolbar;
         private final JCheckBox allRulesBox;
         private final MessageBusConnection messageBusConnection;
+        /** Guards against an older background refresh overwriting a newer tree. */
+        private final java.util.concurrent.atomic.AtomicLong refreshGeneration =
+                new java.util.concurrent.atomic.AtomicLong();
 
         private RulesPanel(Project project) {
             super(new BorderLayout());
             this.project = project;
-            // Match the IDE's tree / editor background (e.g. #191A1C in Islands Dark). A plain
-            // JTree otherwise inherits the generic LAF background, which in Darcula is a grey
-            // block (#3C3F41) that makes the whole list look permanently highlighted.
-            Color treeBackground = tree.getBackground();
-            // BasicTreeUI leaves the row background to the tree itself; IntelliJ's own TreeUI
-            // paints its own grey row background (#33353B) that cannot be overridden per tree.
-            tree.setUI(new javax.swing.plaf.basic.BasicTreeUI());
-            setOpaque(true);
-            setBackground(treeBackground);
-            tree.setOpaque(true);
-            tree.setBackground(treeBackground);
             tree.setCellRenderer(new RuleRenderer());
             tree.setRootVisible(false);
             tree.setShowsRootHandles(true);
-            tree.setRowHeight(22);
             tree.getSelectionModel().setSelectionMode(
                     javax.swing.tree.TreeSelectionModel.SINGLE_TREE_SELECTION);
             tree.addMouseListener(new MouseAdapter() {
@@ -197,10 +154,6 @@ public class MockToolWindowFactory implements ToolWindowFactory {
             top.add(masterHolder, BorderLayout.EAST);
             add(top, BorderLayout.NORTH);
             JBScrollPane scrollPane = new JBScrollPane(tree);
-            scrollPane.setOpaque(true);
-            scrollPane.setBackground(treeBackground);
-            scrollPane.getViewport().setOpaque(true);
-            scrollPane.getViewport().setBackground(treeBackground);
             scrollPane.setBorder(JBUI.Borders.empty());
             add(scrollPane, BorderLayout.CENTER);
 
@@ -355,11 +308,40 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         }
 
         private void refresh() {
-            String selectedId = selectedRule() == null ? null : selectedRule().getId();
+            if (project.isDisposed()) {
+                return;
+            }
+            final String selectedId = selectedRule() == null ? null : selectedRule().getId();
+            final long generation = refreshGeneration.incrementAndGet();
+            // File I/O and PSI lookups must not run on the EDT: resolving a rule's class can
+            // trigger indexing and freeze the UI for seconds on a cold project.
+            ApplicationManager.getApplication().executeOnPooledThread(() -> {
+                if (project.isDisposed()) {
+                    return;
+                }
+                List<MockRule> rules = MockRuleStore.getInstance().load(project);
+                boolean dumb = com.intellij.openapi.project.DumbService.getInstance(project).isDumb();
+                if (!dumb) {
+                    resolveDisplayLines(rules);
+                }
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    if (project.isDisposed() || generation != refreshGeneration.get()) {
+                        return;
+                    }
+                    applyRules(rules, selectedId);
+                });
+                if (dumb) {
+                    // Show the stored lines right away, then refresh again once indexing is done.
+                    com.intellij.openapi.project.DumbService.getInstance(project).runWhenSmart(() ->
+                            ApplicationManager.getApplication().invokeLater(this::refresh));
+                }
+            });
+        }
+
+        /** Rebuilds the tree from already-resolved copies; always runs on the EDT. */
+        private void applyRules(List<MockRule> rules, String selectedId) {
             root.removeAllChildren();
             Map<String, DefaultMutableTreeNode> groups = new LinkedHashMap<>();
-            List<MockRule> rules = MockRuleStore.getInstance().load(project);
-            resolveDisplayLines(rules);
             for (MockRule rule : rules) {
                 DefaultMutableTreeNode group = groups.get(rule.methodKey());
                 if (group == null) {
@@ -379,20 +361,15 @@ public class MockToolWindowFactory implements ToolWindowFactory {
                 selectById(selectedId);
             }
             updateActions();
-            updateMasterSwitch();
+            updateMasterSwitch(rules);
         }
 
         /**
          * Points the list labels at the line the anchored statement currently lives on. Only the
          * in-memory copies are touched here; {@code MockRuleLineSync} persists the correction.
+         * Runs on a pooled thread (never the EDT).
          */
         private void resolveDisplayLines(List<MockRule> rules) {
-            // The tool window is created during startup, often before indexing finished. Finding
-            // classes would throw IndexNotReadyException; retry once the project is smart.
-            if (com.intellij.openapi.project.DumbService.getInstance(project).isDumb()) {
-                com.intellij.openapi.project.DumbService.getInstance(project).runWhenSmart(this::refresh);
-                return;
-            }
             try {
                 ReadAction.compute(() -> {
                     for (MockRule rule : rules) {
@@ -417,19 +394,20 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         }
 
         /** Master switch: checked only when every rule is enabled (mixed state stays unchecked). */
-        private void updateMasterSwitch() {
-            List<MockRule> rules = MockRuleStore.getInstance().load(project);
+        private void updateMasterSwitch(List<MockRule> rules) {
             boolean all = !rules.isEmpty();
+            boolean any = false;
             for (MockRule rule : rules) {
-                if (!rule.isEnabled()) {
+                if (rule.isEnabled()) {
+                    any = true;
+                } else {
                     all = false;
-                    break;
                 }
             }
             allRulesBox.setSelected(all);
             allRulesBox.setEnabled(!rules.isEmpty());
             allRulesBox.setText(all ? "All rules: on" : (rules.isEmpty()
-                    ? "All rules" : (anyRuleEnabled() ? "All rules: mixed" : "All rules: off")));
+                    ? "All rules" : (any ? "All rules: mixed" : "All rules: off")));
         }
 
         private void selectById(String id) {
@@ -449,6 +427,13 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         // --- toolbar actions -------------------------------------------------------------------
 
         private final class EditAction extends AnAction {
+
+            @Override
+            @NotNull
+            public com.intellij.openapi.actionSystem.ActionUpdateThread getActionUpdateThread() {
+                // update() reads the Swing tree selection, which must happen on the UI thread.
+                return com.intellij.openapi.actionSystem.ActionUpdateThread.EDT;
+            }
             EditAction() {
                 super("Edit", "Edit the selected rule", AllIcons.Actions.Edit);
             }
@@ -468,6 +453,13 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         }
 
         private final class NavigateAction extends AnAction {
+
+            @Override
+            @NotNull
+            public com.intellij.openapi.actionSystem.ActionUpdateThread getActionUpdateThread() {
+                // update() reads the Swing tree selection, which must happen on the UI thread.
+                return com.intellij.openapi.actionSystem.ActionUpdateThread.EDT;
+            }
             NavigateAction() {
                 super("Go to Source", "Jump to the rule's source line", AllIcons.Actions.EditSource);
             }
@@ -487,6 +479,13 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         }
 
         private final class ToggleEnabledAction extends AnAction {
+
+            @Override
+            @NotNull
+            public com.intellij.openapi.actionSystem.ActionUpdateThread getActionUpdateThread() {
+                // update() reads the Swing tree selection, which must happen on the UI thread.
+                return com.intellij.openapi.actionSystem.ActionUpdateThread.EDT;
+            }
             ToggleEnabledAction() {
                 super("Enable / Disable", "Toggle the selected rule (or every rule of a method)",
                         AllIcons.Actions.Suspend);
@@ -527,6 +526,13 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         }
 
         private final class DeleteAction extends AnAction {
+
+            @Override
+            @NotNull
+            public com.intellij.openapi.actionSystem.ActionUpdateThread getActionUpdateThread() {
+                // update() reads the Swing tree selection, which must happen on the UI thread.
+                return com.intellij.openapi.actionSystem.ActionUpdateThread.EDT;
+            }
             DeleteAction() {
                 super("Delete", "Delete the selected rule (or every rule of a method)",
                         AllIcons.Actions.GC);
@@ -552,16 +558,6 @@ public class MockToolWindowFactory implements ToolWindowFactory {
             }
         }
 
-        /** True when at least one rule of the project is enabled (drives the master switch). */
-        private boolean anyRuleEnabled() {
-            for (MockRule candidate : MockRuleStore.getInstance().load(project)) {
-                if (candidate.isEnabled()) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
         /** True when at least one rule of the method is enabled (used for method-row actions). */
         private boolean anyEnabled(MethodNode method) {
             if (method == null) {
@@ -582,20 +578,11 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         }
     }
 
-    private static final class RuleRenderer extends DefaultTreeCellRenderer {
-
-        private RuleRenderer() {
-            // DefaultTreeCellRenderer.paint() fills the text bounds with Tree.textBackground
-            // (grey #3C3F41 in Darcula) even when the renderer is non-opaque. Clearing these
-            // colours stops it from drawing a grey "chip" behind every row's text.
-            setBackgroundNonSelectionColor(null);
-        }
-
-        /** Never let the LAF turn the renderer opaque: that paints a grey chip behind the text. */
-        @Override
-        public void setOpaque(boolean isOpaque) {
-            super.setOpaque(false);
-        }
+    /**
+     * Standard platform renderer: selection, focus and background colours come from the IDE theme
+     * (Classic and New UI, light and dark), so no LAF workarounds are needed.
+     */
+    private static final class RuleRenderer extends ColoredTreeCellRenderer {
 
         /** Small round state markers: green when the rule runs, grey when it is disabled. */
         private static final Icon ENABLED_ICON = dot(new Color(0x36B37E));
@@ -614,43 +601,27 @@ public class MockToolWindowFactory implements ToolWindowFactory {
         }
 
         @Override
-        public Component getTreeCellRendererComponent(JTree tree, Object value, boolean selected,
-                                                      boolean expanded, boolean leaf, int row, boolean hasFocus) {
-            super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, hasFocus);
-            Font baseFont = tree.getFont() == null ? getFont() : tree.getFont();
-            Color foreground = textColor(tree);
-            // No background on normal rows; the selected row gets a normal theme highlight.
-            setOpaque(false);
-            setBorder(null);
-            setForeground(foreground);
-            Object userObject = ((DefaultMutableTreeNode) value).getUserObject();
+        public void customizeCellRenderer(@NotNull JTree tree, Object value, boolean selected,
+                                          boolean expanded, boolean leaf, int row, boolean hasFocus) {
+            Object userObject = value instanceof DefaultMutableTreeNode
+                    ? ((DefaultMutableTreeNode) value).getUserObject() : null;
             if (userObject instanceof MockRule) {
                 MockRule rule = (MockRule) userObject;
                 String condition = rule.hasCondition() ? abbreviate(rule.getCondition()) : "always";
                 String detail = detailOf(rule);
                 String line = rule.getLineNumber() > 0 ? "line " + rule.getLineNumber() : "entry";
-                setText(rule.getAction() + "  " + line + "  ·  " + condition + "  →  " + detail);
                 // State is shown by the dot only: the text keeps the normal colour.
                 setIcon(rule.isEnabled() ? ENABLED_ICON : DISABLED_ICON);
-                setFont(selected ? baseFont.deriveFont(Font.BOLD) : baseFont);
+                append(rule.getAction() + "  " + line + "  ·  " + condition + "  →  " + detail,
+                        selected ? SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES
+                                : SimpleTextAttributes.REGULAR_ATTRIBUTES);
             } else if (userObject instanceof MethodNode) {
                 MethodNode node = (MethodNode) userObject;
                 int dot = node.className.lastIndexOf('.');
                 String simpleClass = dot < 0 ? node.className : node.className.substring(dot + 1);
                 setIcon(AllIcons.Nodes.Method);
-                setFont(baseFont.deriveFont(Font.BOLD));
-                setText(simpleClass + "." + node.methodName + "()");
+                append(simpleClass + "." + node.methodName + "()", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
             }
-            return this;
-        }
-
-        /** Theme-aware, readable text colour (never null — some LookAndFeels mishandle null). */
-        private static Color textColor(JTree tree) {
-            Color color = tree.getForeground();
-            if (color == null) {
-                color = UIManager.getColor("Tree.foreground");
-            }
-            return color == null ? Color.BLACK : color;
         }
 
         private static String detailOf(MockRule rule) {

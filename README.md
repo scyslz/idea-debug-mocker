@@ -8,8 +8,9 @@ debugger breakpoint.
 
 ## Features
 
-- **Right-click a Java method → `DebugMock → Add Mock Rule`**, or click the gutter icon next to
-  the method declaration.
+- **Right-click a Java method → `DebugMock → Add Mock Rule`**. Once a method has a rule, a gutter
+  icon appears next to its declaration; click it to edit / enable / disable / remove the rule.
+  Methods without rules have no gutter icon.
 - **Line-level rules**: right-click inside a method body → **`Add DebugMock Rule at This Line`**
   (also available as `DebugMock → Add Rule at This Line`). The rule runs on *that exact source
   line* — not at method entry. The caret line is normalised to the enclosing statement start, so
@@ -30,8 +31,9 @@ debugger breakpoint.
   never fire. The agent skips the generated proxy classes themselves (to avoid running a rule
   twice) and retransforms the already-loaded implementations when a rule is created or edited
   while the app is running.
-- The gutter only shows a line icon for lines that **already have a rule** (no icon on every
-  statement). Click it to edit / enable / disable / delete the rules on that line, or to add
+- The gutter only shows an icon where a rule exists: a method icon for methods with rules and a
+  line icon for lines that **already have a rule** (no icon on every statement or declaration).
+  Click the line icon to edit / enable / disable / delete the rules on that line, or to add
   another one. Existing rules show `@line N` in the tool window.
 - Works both when the caret is **inside** a method and when a **method declaration is selected**.
 - Automatically derives: fully-qualified class name, method name, JVM method descriptor
